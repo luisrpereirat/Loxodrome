@@ -25,3 +25,23 @@ negative as "check on device", not "the path is dead".
 and a PNR plus surname opens a booking on many airline sites (§10). Output
 is redacted by default; `--raw` disables that. Do not commit captures or
 unredacted results — see `.gitignore`.
+
+## Results — capture 1 (2026-09-02, 27s, 416x888)
+
+Wallet Expired list swept, then one United pass opened.
+
+| | Result |
+| :- | :- |
+| Q1 | 24/111 frames decoded — **but only 1 without contrast correction** |
+| Q1b | Wallet dims expired barcodes to ~12% local contrast; CLAHE recovers them |
+| Q2 | untested — capture was 416x888, below the 1600px threshold |
+| Q3 | not exercised — the one pass was single-leg (93 conditional bytes present) |
+| Q4 | **confirmed** — payload carried issue date `3273`, i.e. year digit 3, day 273 |
+
+Q4 is the important one: flight is Julian day 274, issue day 273 — the day
+before, exactly as expected — so the offset is right and the year is
+recoverable from the barcode alone. Year digit 3 → 2023, giving 2023-10-01.
+
+Wallet's own list row for that pass reads **Oct 4, 2023**: same year, three
+days off the barcode's date. Take the year from either and the day from the
+barcode, and flag disagreements over ~1 day for review.

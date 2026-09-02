@@ -5,6 +5,7 @@ M0 capture spike for PassLog.
 Answers, against a real capture, the questions the spec currently assumes:
 
   Q1  Do barcodes survive a Wallet screen recording well enough to decode?
+  Q1b Does contrast normalisation rescue Wallet's dimmed expired barcodes?
   Q2  Does downscaling to 1600 px break PDF417 decode?          (review S3)
   Q3  Do multi-leg payloads carry a conditional section that must be
       skipped between legs?                                     (review B3)
@@ -140,13 +141,39 @@ def extract_frames(path: pathlib.Path, outdir: pathlib.Path, fps: float) -> list
     return sorted(outdir.glob("f*.jpg"))
 
 
-def decode(img):
-    results = []
-    for r in zxingcpp.read_barcodes(img):
-        fmt = str(r.format).split(".")[-1]
-        if fmt in SYMBOLOGIES and r.text:
-            results.append((fmt, r.text))
-    return results
+def _read(img):
+    return [(str(r.format).split(".")[-1], r.text, r)
+            for r in zxingcpp.read_barcodes(img)
+            if r.text and str(r.format).split(".")[-1] in SYMBOLOGIES]
+
+
+def decode(img, enhance=True):
+    """Decode, falling back to local contrast equalisation.
+
+    Wallet dims an expired pass's barcode to roughly 12% of the contrast
+    range. The surrounding frame still spans the full range, so a global
+    stretch is a no-op -- only tile-local equalisation (CLAHE) recovers it.
+    Measured on a real capture: 1/32 frames raw, 24/32 with CLAHE.
+    """
+    hits = _read(img)
+    if hits or not enhance:
+        return [(f, t) for f, t, _ in hits], "raw" if hits else None
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    equalised = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8)).apply(gray)
+    hits = _read(equalised)
+    return [(f, t) for f, t, _ in hits], ("clahe" if hits else None)
+
+
+def local_contrast(img, r) -> float:
+    """Contrast of the barcode tile itself, as a fraction of full range."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    x0, y0 = r.position.top_left.x, r.position.top_left.y
+    x1, y1 = r.position.bottom_right.x, r.position.bottom_right.y
+    roi = gray[min(y0, y1):max(y0, y1), min(x0, x1):max(x0, x1)]
+    if roi.size == 0:
+        return float("nan")
+    import numpy as np
+    return (np.percentile(roi, 95) - np.percentile(roi, 5)) / 255
 
 
 def main():
@@ -166,14 +193,17 @@ def main():
     full, scaled = {}, set()
     frames_with_decode = 0
     symbology_counts = Counter()
+    method_counts = Counter()
+    downscaled_any = False
 
     for fp in frames:
         img = cv2.imread(str(fp))
         if img is None:
             continue
-        hits = decode(img)
+        hits, method = decode(img)
         if hits:
             frames_with_decode += 1
+            method_counts[method] += 1
         for fmt, text in hits:
             symbology_counts[fmt] += 1
             full.setdefault(text, {"symbology": fmt, "first_frame": fp.name})
@@ -181,25 +211,34 @@ def main():
         # Q2: same frame, downscaled the way §4.1 proposes.
         h, w = img.shape[:2]
         if max(h, w) > args.max_dim:
-            s = args.max_dim / max(h, w)
-            small = cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
-            scaled.update(t for _, t in decode(small))
+            downscaled_any = True
+            k = args.max_dim / max(h, w)
+            small = cv2.resize(img, (int(w * k), int(h * k)), interpolation=cv2.INTER_AREA)
+            scaled.update(t for _, t in decode(small)[0])
 
     print("=== Q1  decode rate ===")
     pct = 100 * frames_with_decode / len(frames) if frames else 0
     print(f"frames yielding >=1 barcode : {frames_with_decode}/{len(frames)} ({pct:.0f}%)")
     print(f"unique payloads             : {len(full)}")
-    print(f"symbologies                 : {dict(symbology_counts) or 'none'}\n")
+    print(f"symbologies                 : {dict(symbology_counts) or 'none'}")
+    print(f"decoded raw / after CLAHE   : {method_counts['raw']} / {method_counts['clahe']}"
+          + ("  <- contrast fix is carrying the pipeline"
+             if method_counts["clahe"] > method_counts["raw"] else ""))
+    print()
 
     print(f"=== Q2  downscale to {args.max_dim}px ===")
-    lost = set(full) - scaled
-    print(f"payloads at native res      : {len(full)}")
-    print(f"payloads at {args.max_dim}px{'':9}: {len(scaled)}")
-    print(f"LOST by downscaling         : {len(lost)}"
-          + ("  <- do barcode detection at native res" if lost else "  <- downscale is safe"))
-    for t in lost:
-        print(f"    lost: {full[t]['symbology']}")
-    print()
+    if not downscaled_any:
+        print(f"capture long edge is already <= {args.max_dim}px -- not tested.")
+        print("Re-run on a native-resolution capture to answer this.\n")
+    else:
+        lost = set(full) - scaled
+        print(f"payloads at native res      : {len(full)}")
+        print(f"payloads at {args.max_dim}px{'':9}: {len(scaled)}")
+        print(f"LOST by downscaling         : {len(lost)}"
+              + ("  <- do barcode detection at native res" if lost else "  <- downscale is safe"))
+        for t in lost:
+            print(f"    lost: {full[t]['symbology']}")
+        print()
 
     print("=== Q3/Q4  BCBP structure ===")
     valid = rejected = 0
