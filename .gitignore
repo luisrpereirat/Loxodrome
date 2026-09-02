@@ -1,0 +1,11 @@
+# Captures and probe output carry passenger name, PNR and frequent flyer
+# number. Never commit them.
+m0-out/
+*.mov
+*.mp4
+*.png
+*.jpg
+*.jpeg
+*.heic
+*.pkpass
+results.json
